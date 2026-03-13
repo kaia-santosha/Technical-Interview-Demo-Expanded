@@ -886,6 +886,18 @@
   }
 
   /* ─────────────────────────────────────────
+     POLLING STATE
+  ───────────────────────────────────────── */
+  let _pollTimer = null;
+
+  function stopPolling() {
+    if (_pollTimer !== null) {
+      clearTimeout(_pollTimer);
+      _pollTimer = null;
+    }
+  }
+
+  /* ─────────────────────────────────────────
      FORM SUBMIT
   ───────────────────────────────────────── */
   async function handleSubmit() {
@@ -903,32 +915,103 @@
       return;
     }
 
-    // Update loading sub-text with context
     document.getElementById('loading-sub-text').textContent =
-      `Researching ${state} beaches ${days} day${days !== 1 ? 's' : ''} from now…`;
+      `Submitting your request for ${state} beaches ${days} day${days !== 1 ? 's' : ''} from now…`;
 
     showView('view-loading');
+    stopPolling();
 
     const WEBHOOK_URL = 'https://coder1080.app.n8n.cloud/webhook/example-technical-interview-expanded-demo';
+    const POLL_URL    = 'https://coder1080.app.n8n.cloud/webhook/beach-status';
+    const POLL_INTERVAL_MS = 3000;
+    const TIMEOUT_MS       = 10 * 60 * 1000; // 10 minutes
 
     try {
       const url = new URL(WEBHOOK_URL);
       url.searchParams.set('days_from_now', days);
       url.searchParams.set('state', state);
 
-      const response = await fetch(url.toString(), {
+      const initResponse = await fetch(url.toString(), {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
       });
 
-      if (!response.ok) {
-        throw new Error(`The server returned an error (HTTP ${response.status}). Please try again.`);
+      if (!initResponse.ok) {
+        throw new Error(`The server returned an error (HTTP ${initResponse.status}). Please try again.`);
       }
 
-      const raw = await response.json();
-      const data = Array.isArray(raw) ? raw[0] : raw;
-      renderResults(data);
-      showView('view-results');
+      const initData = await initResponse.json();
+
+      let jobId = '';
+      if (typeof initData === 'number' || typeof initData === 'string') {
+        // Webhook responded with a bare jobId value (e.g. 257 or "257")
+        jobId = String(initData).trim();
+      } else {
+        const initItem = Array.isArray(initData) ? initData[0] : initData;
+        if (initItem != null && initItem.jobId != null) {
+          jobId = String(initItem.jobId).trim();
+        }
+      }
+
+      if (!jobId) {
+        throw new Error('No job ID was returned by the server. Please try again.');
+      }
+
+      document.getElementById('loading-sub-text').textContent =
+        `Researching ${state} beaches — this may take a moment…`;
+
+      const deadline = Date.now() + TIMEOUT_MS;
+
+      function schedulePoll() {
+        _pollTimer = setTimeout(doPoll, POLL_INTERVAL_MS);
+      }
+
+      async function doPoll() {
+        _pollTimer = null;
+
+        if (Date.now() >= deadline) {
+          showView('view-form');
+          showError('The beach research is taking longer than expected (10-minute timeout reached). Please try again.');
+          return;
+        }
+
+        try {
+          const pollUrl = new URL(POLL_URL);
+          pollUrl.searchParams.set('jobId', jobId);
+
+          const pollResponse = await fetch(pollUrl.toString(), {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+          });
+
+          if (!pollResponse.ok) {
+            throw new Error(`Polling error (HTTP ${pollResponse.status}). Please try again.`);
+          }
+
+          const pollRaw = await pollResponse.json();
+          const pollData = Array.isArray(pollRaw) ? pollRaw[0] : pollRaw;
+
+          if (pollData && pollData.status === 'completed') {
+            let result;
+            if (typeof pollData.completed_run === 'string') {
+              result = JSON.parse(pollData.completed_run);
+            } else {
+              result = pollData.completed_run;
+            }
+            renderResults(result);
+            showView('view-results');
+          } else {
+            // Still processing — poll again
+            schedulePoll();
+          }
+
+        } catch (pollErr) {
+          showView('view-form');
+          showError(pollErr.message || 'Something went wrong while checking your job status. Please try again.');
+        }
+      }
+
+      schedulePoll();
 
     } catch (err) {
       showView('view-form');
@@ -1032,6 +1115,7 @@
      RESET
   ───────────────────────────────────────── */
   function resetApp() {
+    stopPolling();
     document.getElementById('state-select').value = '';
     document.getElementById('days-input').value = '';
     const banner = document.getElementById('error-banner');
